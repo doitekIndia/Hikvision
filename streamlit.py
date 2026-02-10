@@ -1,12 +1,13 @@
 import streamlit as st
 import cv2
-import av
+import subprocess
+import numpy as np
 import os
 import re
 import requests
 from datetime import datetime
 from requests.auth import HTTPDigestAuth
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+import time
 
 # ---------------- CONFIG ----------------
 st.set_page_config(page_title="Hikvision Dashboard", layout="centered")
@@ -16,16 +17,12 @@ os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 # ---------------- FUNCTIONS ----------------
 def normalize_ips(raw_input):
-    raw_input = raw_input.replace("\r", "")
-    parts = re.split(r"[,\n]+", raw_input)
+    raw_input = raw_input.replace("\\r", "")
+    parts = re.split(r"[,\\n]+", raw_input)
     return [ip.strip() for ip in parts if ip.strip()]
 
-def build_rtsp(ip, username, password):
-    # ✅ Hikvision ISAPI + substream + TCP-friendly
-    return (
-        f"rtsp://{username}:{password}@{ip}:554/"
-        f"ISAPI/Streaming/Channels/102"
-    )
+def build_rtsp(ip, username, password, channel="101"):  # Default to main stream
+    return f"rtsp://{username}:{password}@{ip}:554/ISAPI/Streaming/Channels/{channel}"
 
 def take_screenshot(ip, username, password):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -49,24 +46,30 @@ def take_screenshot(ip, username, password):
 
     return None
 
-# ---------------- WEBRTC PROCESSOR ----------------
-class HikvisionProcessor(VideoProcessorBase):
-    def __init__(self, rtsp_url):
-        self.cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-
-        if not self.cap.isOpened():
-            st.error("❌ Failed to open RTSP stream")
-
-    def recv(self, frame):
-        ret, img = self.cap.read()
-        if not ret:
-            return frame
-
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        return av.VideoFrame.from_ndarray(img, format="rgb24")
+def rtsp_to_image(rtsp_url, timeout=10):
+    """FFmpeg RTSP → single frame (cloud-compatible)"""
+    cmd = [
+        'ffmpeg',
+        '-rtsp_transport', 'tcp',
+        '-i', rtsp_url,
+        '-f', 'image2pipe',
+        '-vframes', '1',
+        '-pix_fmt', 'bgr24',
+        '-'
+    ]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        img_bytes, err = proc.communicate(timeout=timeout)
+        if proc.returncode == 0 and img_bytes:
+            return cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    except Exception as e:
+        st.error(f"FFmpeg error: {e}")
+    return None
 
 # ---------------- UI ----------------
-st.title("📷 Hikvision Camera Dashboard (Cloud + WebRTC)")
+st.title("📷 Hikvision Dashboard (Cloud-Friendly)")
 
 username = st.text_input("Username")
 password = st.text_input("Password", type="password")
@@ -74,42 +77,49 @@ password = st.text_input("Password", type="password")
 ips_raw = st.text_area(
     "Paste PUBLIC IP addresses (one per line or comma separated)",
     height=150,
-    placeholder="10.20.10.22\n136.232.171.27"
+    placeholder="136.232.171.26\n10.20.10.22"
 )
 
 mode = st.radio(
     "Mode",
-    ["Live View (WebRTC)", "Screenshot Only"]
+    ["Live Frames (FFmpeg - Cloud OK)", "Screenshot Only"]
 )
 
-submit = st.button("Submit")
+channel = st.selectbox("Stream", ["101 (Main/High Res)", "102 (Sub/Low Latency)"])
+
+refresh_rate = st.slider("Refresh (seconds)", 1, 10, 3)
+
+submit = st.button("Start")
 
 # ---------------- LOGIC ----------------
-if submit:
-    if not username or not password or not ips_raw:
-        st.error("Please fill all fields")
-    else:
-        ips = normalize_ips(ips_raw)
+if submit and username and password and ips_raw:
+    ips = normalize_ips(ips_raw)
+    
+    for ip in ips:
+        with st.expander(f"📡 Camera: `{ip}`", expanded=True):
+            rtsp_url = build_rtsp(ip, username, password, channel[-3:])  # Extract 101/102
+            st.code(rtsp_url)
 
-        for ip in ips:
-            st.markdown(f"### 📡 Camera: `{ip}`")
+            if mode == "Live Frames (FFmpeg - Cloud OK)":
+                placeholder = st.empty()
+                
+                # Continuous live refresh
+                while True:
+                    with placeholder.container():
+                        img = rtsp_to_image(rtsp_url)
+                        if img is not None:
+                            st.image(
+                                cv2.cvtColor(img, cv2.COLOR_BGR2RGB),
+                                caption=f"Live from {ip} (refreshes every {refresh_rate}s)",
+                                use_container_width=True
+                            )
+                        else:
+                            st.warning(f"Failed to fetch frame from {ip}")
+                    
+                    time.sleep(refresh_rate)
+                    st.rerun()  # Refresh page for new frame
 
-            rtsp_url = build_rtsp(ip, username, password)
-            st.code(rtsp_url)  # helps debugging
-
-            if mode == "Live View (WebRTC)":
-                webrtc_streamer(
-                    key=f"cam-{ip}",
-                    video_processor_factory=lambda: HikvisionProcessor(rtsp_url),
-                    media_stream_constraints={"video": True, "audio": False},
-                    rtc_configuration={
-                        "iceServers": [
-                            {"urls": ["stun:stun.l.google.com:19302"]}
-                        ]
-                    },
-                )
-
-            else:
+            else:  # Screenshot
                 image_path = take_screenshot(ip, username, password)
                 if image_path:
                     st.image(
@@ -119,5 +129,5 @@ if submit:
                     )
                 else:
                     st.warning("No snapshot received")
-
-
+else:
+    st.info("👆 Enter credentials and IPs, then click Submit")
