@@ -32,7 +32,7 @@ def take_screenshot(ip, username, password):
     filename = f"{ip}_{timestamp}.jpg".replace(".", "_")
     path = os.path.join(SCREENSHOT_DIR, filename)
 
-    url = f"http://{ip}/ISAPI/Streaming/channels/1/picture"
+    url = f"http://{ip}:8000/ISAPI/Streaming/channels/1/picture"
 
     try:
         r = requests.get(
@@ -119,4 +119,5 @@ if submit:
                     )
                 else:
                     st.warning("No snapshot received")
+
 
