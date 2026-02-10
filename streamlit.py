@@ -21,7 +21,7 @@ def normalize_ips(raw_input):
     parts = re.split(r"[,\\n]+", raw_input)
     return [ip.strip() for ip in parts if ip.strip()]
 
-def build_rtsp(ip, username, password, channel="101"):  # Default to main stream
+def build_rtsp(ip, username, password, channel="101"):  # Fixed channel param
     return f"rtsp://{username}:{password}@{ip}:554/ISAPI/Streaming/Channels/{channel}"
 
 def take_screenshot(ip, username, password):
@@ -32,25 +32,21 @@ def take_screenshot(ip, username, password):
     url = f"http://{ip}:8000/ISAPI/Streaming/channels/1/picture"
 
     try:
-        r = requests.get(
-            url,
-            auth=HTTPDigestAuth(username, password),
-            timeout=5
-        )
+        r = requests.get(url, auth=HTTPDigestAuth(username, password), timeout=10)
         if r.status_code == 200:
             with open(path, "wb") as f:
                 f.write(r.content)
             return path
     except Exception as e:
         st.error(f"Screenshot failed for {ip}: {e}")
-
     return None
 
-def rtsp_to_image(rtsp_url, timeout=10):
-    """FFmpeg RTSP → single frame (cloud-compatible)"""
+def rtsp_to_image(rtsp_url, timeout=15):  # Increased timeout
+    """Enhanced FFmpeg with better error reporting"""
     cmd = [
         'ffmpeg',
         '-rtsp_transport', 'tcp',
+        '-timeout', '5000000',  # 5s timeout
         '-i', rtsp_url,
         '-f', 'image2pipe',
         '-vframes', '1',
@@ -58,76 +54,85 @@ def rtsp_to_image(rtsp_url, timeout=10):
         '-'
     ]
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.Popen(
+            cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL
+        )
         img_bytes, err = proc.communicate(timeout=timeout)
+        
         if proc.returncode == 0 and img_bytes:
             return cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+        else:
+            st.error(f"FFmpeg failed (code {proc.returncode}): {err.decode()[:200]}")
     except subprocess.TimeoutExpired:
         proc.kill()
+        st.error("FFmpeg timeout - camera unreachable")
     except Exception as e:
         st.error(f"FFmpeg error: {e}")
     return None
 
 # ---------------- UI ----------------
-st.title("📷 Hikvision Dashboard (Cloud-Friendly)")
+st.title("🔧 Hikvision Dashboard (Fixed)")
 
 username = st.text_input("Username")
 password = st.text_input("Password", type="password")
 
 ips_raw = st.text_area(
-    "Paste PUBLIC IP addresses (one per line or comma separated)",
-    height=150,
-    placeholder="136.232.171.26\n10.20.10.22"
+    "Paste PUBLIC IP addresses",
+    height=100,
+    placeholder="136.232.171.26"
 )
 
-mode = st.radio(
-    "Mode",
-    ["Live Frames (FFmpeg - Cloud OK)", "Screenshot Only"]
-)
+mode = st.radio("Mode", ["Live Frames (FFmpeg)", "Screenshot Only"])
 
-channel = st.selectbox("Stream", ["101 (Main/High Res)", "102 (Sub/Low Latency)"])
+# Fixed channel selection
+channel_map = {"Main Stream (101)": "101", "Sub Stream (102)": "102"}
+channel_name = st.selectbox("Stream Type", list(channel_map.keys()))
+channel = channel_map[channel_name]
 
-refresh_rate = st.slider("Refresh (seconds)", 1, 10, 3)
+test_rtsp = st.checkbox("Show RTSP URL for VLC test")
 
-submit = st.button("Start")
+submit = st.button("Start Cameras")
 
 # ---------------- LOGIC ----------------
 if submit and username and password and ips_raw:
     ips = normalize_ips(ips_raw)
     
     for ip in ips:
-        with st.expander(f"📡 Camera: `{ip}`", expanded=True):
-            rtsp_url = build_rtsp(ip, username, password, channel[-3:])  # Extract 101/102
-            st.code(rtsp_url)
-
-            if mode == "Live Frames (FFmpeg - Cloud OK)":
-                placeholder = st.empty()
-                
-                # Continuous live refresh
-                while True:
-                    with placeholder.container():
-                        img = rtsp_to_image(rtsp_url)
-                        if img is not None:
-                            st.image(
-                                cv2.cvtColor(img, cv2.COLOR_BGR2RGB),
-                                caption=f"Live from {ip} (refreshes every {refresh_rate}s)",
-                                use_container_width=True
-                            )
-                        else:
-                            st.warning(f"Failed to fetch frame from {ip}")
-                    
-                    time.sleep(refresh_rate)
-                    st.rerun()  # Refresh page for new frame
-
-            else:  # Screenshot
-                image_path = take_screenshot(ip, username, password)
-                if image_path:
+        with st.expander(f"📹 {ip}", expanded=True):
+            rtsp_url = build_rtsp(ip, username, password, channel)
+            
+            if test_rtsp:
+                st.code(rtsp_url)
+                st.info("✅ Copy this to VLC - should work exactly like your test")
+            
+            if mode == "Live Frames (FFmpeg)":
+                st.info("⏳ Fetching frame... (15s timeout)")
+                img = rtsp_to_image(rtsp_url)
+                if img is not None:
                     st.image(
-                        image_path,
-                        caption=f"Snapshot from {ip}",
+                        cv2.cvtColor(img, cv2.COLOR_BGR2RGB),
+                        caption=f"✅ LIVE from {ip}",
                         use_container_width=True
                     )
+                    st.success("Live frame captured!")
                 else:
-                    st.warning("No snapshot received")
+                    st.error("❌ No frame - check firewall/IP whitelist")
+                    st.info("👉 Screenshot mode often works when live fails")
+                    
+                    # Try screenshot as fallback
+                    st.subheader("Screenshot Fallback:")
+                    image_path = take_screenshot(ip, username, password)
+                    if image_path:
+                        st.image(image_path, caption=f"Screenshot from {ip}", use_container_width=True)
+
+            else:  # Screenshot mode
+                image_path = take_screenshot(ip, username, password)
+                if image_path:
+                    st.image(image_path, caption=f"Snapshot from {ip}", use_container_width=True)
+                else:
+                    st.warning("Screenshot also failed - check credentials/IP")
 else:
-    st.info("👆 Enter credentials and IPs, then click Submit")
+    st.info("👆 Fill all fields and click Start")
