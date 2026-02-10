@@ -74,7 +74,7 @@ password = st.text_input("Password", type="password")
 ips_raw = st.text_area(
     "Paste PUBLIC IP addresses (one per line or comma separated)",
     height=150,
-    placeholder="136.232.171.26\n136.232.171.27"
+    placeholder="10.20.10.22\n136.232.171.27"
 )
 
 mode = st.radio(
@@ -119,3 +119,4 @@ if submit:
                     )
                 else:
                     st.warning("No snapshot received")
+
