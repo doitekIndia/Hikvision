@@ -1,18 +1,17 @@
 import streamlit as st
-import subprocess
+import cv2
 import os
-import requests
-from requests.auth import HTTPDigestAuth
-from datetime import datetime
-import time
 import re
+import requests
+from datetime import datetime
+from requests.auth import HTTPDigestAuth
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 
 # ---------------- CONFIG ----------------
-VLC_PATH = r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe"
+st.set_page_config(page_title="Hikvision Dashboard", layout="centered")
+
 SCREENSHOT_DIR = "screenshots"
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-
-st.set_page_config(page_title="Hikvision Dashboard", layout="centered")
 
 # ---------------- FUNCTIONS ----------------
 def normalize_ips(raw_input):
@@ -20,14 +19,8 @@ def normalize_ips(raw_input):
     parts = re.split(r"[,\n]+", raw_input)
     return [ip.strip() for ip in parts if ip.strip()]
 
-def open_vlc(ip, username, password):
-    rtsp_url = f"rtsp://{username}:{password}@{ip}/Streaming/Channels/101"
-    return subprocess.Popen([
-        VLC_PATH,
-        rtsp_url,
-        "--rtsp-tcp",
-        "--network-caching=150"
-    ])
+def build_rtsp(ip, username, password):
+    return f"rtsp://{username}:{password}@{ip}:554/Streaming/Channels/101"
 
 def take_screenshot(ip, username, password):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -46,25 +39,37 @@ def take_screenshot(ip, username, password):
             with open(path, "wb") as f:
                 f.write(r.content)
             return path
-    except:
-        pass
+    except Exception as e:
+        st.error(f"Screenshot failed for {ip}: {e}")
 
     return None
 
+# ---------------- WEBRTC PROCESSOR ----------------
+class HikvisionProcessor(VideoProcessorBase):
+    def __init__(self, rtsp_url):
+        self.cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+
+    def recv(self, frame):
+        ret, img = self.cap.read()
+        if not ret:
+            return frame
+        return img
+
 # ---------------- UI ----------------
-st.title("📷 Hikvision Camera Dashboard")
+st.title("📷 Hikvision Camera Dashboard (Cloud + WebRTC)")
 
 username = st.text_input("Username")
 password = st.text_input("Password", type="password")
 
 ips_raw = st.text_area(
-    "Paste IP addresses (one per line or comma separated)",
-    height=150
+    "Paste PUBLIC IP addresses (one per line or comma separated)",
+    height=150,
+    placeholder="136.232.171.26\n136.232.171.27"
 )
 
 mode = st.radio(
     "Mode",
-    ["Live View in VLC", "Screenshot (Auto Close VLC)"]
+    ["Live View (WebRTC)", "Screenshot Only"]
 )
 
 submit = st.button("Submit")
@@ -75,27 +80,21 @@ if submit:
         st.error("Please fill all fields")
     else:
         ips = normalize_ips(ips_raw)
-        results = []
 
-        with st.spinner("Processing cameras..."):
-            for ip in ips:
-                st.write(f"🔹 Processing {ip}")
+        for ip in ips:
+            st.markdown(f"### 📡 Camera: `{ip}`")
+            rtsp_url = build_rtsp(ip, username, password)
 
-                if mode == "Live View in VLC":
-                    open_vlc(ip, username, password)
+            if mode == "Live View (WebRTC)":
+                webrtc_streamer(
+                    key=f"cam-{ip}",
+                    video_processor_factory=lambda: HikvisionProcessor(rtsp_url),
+                    media_stream_constraints={"video": True, "audio": False},
+                )
 
+            else:
+                image_path = take_screenshot(ip, username, password)
+                if image_path:
+                    st.image(image_path, caption=f"Snapshot from {ip}", use_container_width=True)
                 else:
-                    vlc_process = open_vlc(ip, username, password)
-                    time.sleep(2)
-                    vlc_process.terminate()
-
-                    image_path = take_screenshot(ip, username, password)
-                    if image_path:
-                        results.append((ip, image_path))
-
-        # ---------------- RESULTS ----------------
-        if results:
-            st.subheader("📸 Screenshots")
-            for ip, image_path in results:
-                st.markdown(f"**Camera IP:** {ip}")
-                st.image(image_path, use_container_width=True)
+                    st.warning("No snapshot received")
