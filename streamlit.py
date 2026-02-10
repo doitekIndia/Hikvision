@@ -1,5 +1,6 @@
 import streamlit as st
 import cv2
+import av
 import os
 import re
 import requests
@@ -20,7 +21,11 @@ def normalize_ips(raw_input):
     return [ip.strip() for ip in parts if ip.strip()]
 
 def build_rtsp(ip, username, password):
-    return f"rtsp://{username}:{password}@{ip}:554/Streaming/Channels/101"
+    # ✅ Hikvision ISAPI + substream + TCP-friendly
+    return (
+        f"rtsp://{username}:{password}@{ip}:554/"
+        f"ISAPI/Streaming/Channels/102"
+    )
 
 def take_screenshot(ip, username, password):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -49,11 +54,16 @@ class HikvisionProcessor(VideoProcessorBase):
     def __init__(self, rtsp_url):
         self.cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
 
+        if not self.cap.isOpened():
+            st.error("❌ Failed to open RTSP stream")
+
     def recv(self, frame):
         ret, img = self.cap.read()
         if not ret:
             return frame
-        return img
+
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        return av.VideoFrame.from_ndarray(img, format="rgb24")
 
 # ---------------- UI ----------------
 st.title("📷 Hikvision Camera Dashboard (Cloud + WebRTC)")
@@ -83,18 +93,29 @@ if submit:
 
         for ip in ips:
             st.markdown(f"### 📡 Camera: `{ip}`")
+
             rtsp_url = build_rtsp(ip, username, password)
+            st.code(rtsp_url)  # helps debugging
 
             if mode == "Live View (WebRTC)":
                 webrtc_streamer(
                     key=f"cam-{ip}",
                     video_processor_factory=lambda: HikvisionProcessor(rtsp_url),
                     media_stream_constraints={"video": True, "audio": False},
+                    rtc_configuration={
+                        "iceServers": [
+                            {"urls": ["stun:stun.l.google.com:19302"]}
+                        ]
+                    },
                 )
 
             else:
                 image_path = take_screenshot(ip, username, password)
                 if image_path:
-                    st.image(image_path, caption=f"Snapshot from {ip}", use_container_width=True)
+                    st.image(
+                        image_path,
+                        caption=f"Snapshot from {ip}",
+                        use_container_width=True
+                    )
                 else:
                     st.warning("No snapshot received")
