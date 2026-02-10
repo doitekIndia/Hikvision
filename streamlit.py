@@ -74,7 +74,7 @@ def rtsp_to_image(rtsp_url, timeout=15):  # Increased timeout
     return None
 
 # ---------------- UI ----------------
-st.title("🔧 Hikvision Dashboard (Enter Your Hikvision IP Camera UserName,Password and IP Address Static IP/Public IP")
+st.title("🔧 Hikvision Dashboard")
 
 username = st.text_input("Username")
 password = st.text_input("Password", type="password")
@@ -136,5 +136,6 @@ if submit and username and password and ips_raw:
                     st.warning("Screenshot also failed - check credentials/IP")
 else:
     st.info("👆 Fill all fields and click Start")
+
 
 
